@@ -1115,19 +1115,24 @@ func (self *Track) WriteSample(pts int64, dts int64, isKeyFrame bool, data []byt
 
 /*
 
-av.Stream
-IsVideo()
+av.CodecType
+H264
+AAC
+G726
 IsAudio()
-TimeScale()
-SetTimeScale()
+IsVideo()
+
+av.Stream
 CodecData() data, ok
 SetCodecData(data) err
 Type() H264/AAC/G726
 SetType()
-AudioInfo()
-VideoInfo()
 String()
-FillParamsByStream()
+TimeScale()
+SetTimeScale()
+TsToTime()
+TimeToTs()
+//FillParamsByStream()
 
 codec/h264parser
 codec/aacparser
@@ -1147,7 +1152,7 @@ ReadPacket() av.Packet
 SeekToTime(1.11)
 
 av.Packet
-Stream
+StreamIdx
 Data
 IsKeyFrame
 Pts/Dts

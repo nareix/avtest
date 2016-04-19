@@ -58,6 +58,6 @@ func init() {
 	C.ffctx_openfile(ctx, C.CString("test.mp4"))
 	C.ffctx_get_stream_codec_extradata(ctx, 0, &p, &size)
 	b := C.GoBytes(p, size)
-	println(b)
+	println("ffmpeg", b)
 }
 
