@@ -7,11 +7,13 @@ import (
 	"io"
 	"io/ioutil"
 	"encoding/json"
+	"github.com/nareix/av"
 	"github.com/nareix/mp4"
 	"github.com/nareix/ts"
 	"github.com/nareix/mp4/atom"
 	"fmt"
 	"flag"
+	"net/http"
 )
 
 func testMp4Demux() {
@@ -29,20 +31,26 @@ func testMp4Demux() {
 	demuxer.ReadHeader()
 	streams := demuxer.Streams()
 
+	type Packet struct {
+		av.Packet
+		i int
+	}
+	pkts := []Packet{}
+
 	muxer := &mp4.Muxer{W: outfile}
 	muxer2 := &ts.Muxer{W: outfile2}
 
-	for _, stream := range streams {
-		ns := muxer.NewStream()
-		ns2 := muxer2.NewStream()
-		err = ns.FillParamsByStream(stream)
-		fmt.Println(err)
-		err = ns2.FillParamsByStream(stream)
-		fmt.Println(err)
+	setStreams := func(muxer av.Muxer) {
+		for _, stream := range streams {
+			ns := muxer.NewStream()
+			ns.FillParamsByStream(stream)
+		}
 	}
+
+	setStreams(muxer)
+	setStreams(muxer2)
 	err = muxer.WriteHeader()
 	fmt.Println(err)
-
 	err = muxer2.WriteHeader()
 	fmt.Println(err)
 
@@ -50,6 +58,7 @@ func testMp4Demux() {
 	fmt.Println(demuxer.SeekToTime(14.3*60.0))
 
 	gop := 0
+	totalTime := float64(0.0)
 	for {
 		i, pkt, err := demuxer.ReadPacket()
 		if err != nil {
@@ -63,12 +72,42 @@ func testMp4Demux() {
 		}
 		fmt.Println(streams[i].Type(), fmt.Sprintf("ts=%.2f dur=%.3f cts=%.3f", demuxer.Time(), pkt.Duration, pkt.CompositionTime),
 			pkt.IsKeyFrame, len(pkt.Data), fmt.Sprintf("%x", pkt.Data[:4]))
-		muxer.WritePacket(i, pkt)
-		muxer2.WritePacket(i, pkt)
+
+		if streams[i].IsVideo() {
+			totalTime += pkt.Duration
+		}
+
+		pkts = append(pkts, Packet{i:i, Packet:pkt})
+	}
+
+	for i := 0; i < 3; i++ {
+		for _, pkt := range pkts {
+			muxer.WritePacket(pkt.i, pkt.Packet)
+			muxer2.WritePacket(pkt.i, pkt.Packet)
+		}
 	}
 
 	err = muxer.WriteTrailer()
 	fmt.Println(err)
+
+	indexfile, _ := os.Create("projectindex.m3u8")
+	writeM3U8Header(indexfile, totalTime+1)
+
+	for i := 0; i < 10; i++ {
+		filename := fmt.Sprintf("projectindex.hls.%d.ts", i)
+		file, _ := os.Create(filename)
+		muxer := &ts.Muxer{W: file}
+		setStreams(muxer)
+		muxer.WriteHeader()
+		for _, pkt := range pkts {
+			muxer.WritePacket(pkt.i, pkt.Packet)
+		}
+		file.Close()
+		writeM3U8Item(indexfile, filename, totalTime)
+	}
+
+	writeM3U8Footer(indexfile)
+	indexfile.Close()
 }
 
 func dumpFragMp4(filename string) {
@@ -119,19 +158,50 @@ func dumpFragMp4(filename string) {
 	outfile.Close()
 }
 
+func dumpTs(filename string) {
+	dumpfile, _ := os.Create(filename+".dumpts.log")
+	ts.DebugReader = true
+	ts.DebugOutput = dumpfile
+	file, err := os.Open(filename)
+	demuxer := ts.Demuxer{R: file}
+
+	err = demuxer.ReadHeader()
+	streams := demuxer.Streams()
+	fmt.Println(streams, err)
+
+	for {
+		i, pkt, err := demuxer.ReadPacket()
+		if err != nil {
+			break
+		}
+
+		fmt.Println(streams[i].Type(), fmt.Sprintf("ts=%.2f dur=%.3f cts=%.3f", demuxer.Time(), pkt.Duration, pkt.CompositionTime),
+			pkt.IsKeyFrame, len(pkt.Data), fmt.Sprintf("%x", pkt.Data[:4]))
+	}
+	dumpfile.Close()
+}
+
 func main() {
+	dumpts := flag.String("dumpts", "", "dump ts file info")
 	dumpfrag := flag.String("dumpfrag", "", "dump fragment mp4 info")
+	httpserver := flag.String("httpserver", "", "server http")
 	test := flag.Bool("test", false, "test")
 	flag.Parse()
 
+	if *dumpts != "" {
+		dumpTs(*dumpts)
+	}
+
 	if *dumpfrag != "" {
 		dumpFragMp4(*dumpfrag)
-		return
 	}
 
 	if *test {
 		testMp4Demux()
-		return
+	}
+
+	if *httpserver != "" {
+		http.ListenAndServe(*httpserver, http.FileServer(http.Dir(".")))
 	}
 }
 
