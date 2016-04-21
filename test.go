@@ -8,25 +8,67 @@ import (
 	"io/ioutil"
 	"encoding/json"
 	"github.com/nareix/mp4"
+	"github.com/nareix/ts"
 	"github.com/nareix/mp4/atom"
 	"fmt"
 	"flag"
 )
 
 func testMp4Demux() {
-	file, _ := os.Open("projectindex.mp4")
-	demuxer := &mp4.Demuxer{R: file}
+	var err error
+	outfile, _ := os.Create("out.mp4")
+	defer outfile.Close()
+
+	outfile2, _ := os.Create("out.ts")
+	defer outfile2.Close()
+
+	//infile, _ := os.Open("projectindex.mp4")
+	//demuxer := &mp4.Demuxer{R: infile}
+	demuxer := &FFDemuxer{Filename: "projectindex.mp4"}
+
 	demuxer.ReadHeader()
 	streams := demuxer.Streams()
+
+	muxer := &mp4.Muxer{W: outfile}
+	muxer2 := &ts.Muxer{W: outfile2}
+
+	for _, stream := range streams {
+		ns := muxer.NewStream()
+		ns2 := muxer2.NewStream()
+		err = ns.FillParamsByStream(stream)
+		fmt.Println(err)
+		err = ns2.FillParamsByStream(stream)
+		fmt.Println(err)
+	}
+	err = muxer.WriteHeader()
+	fmt.Println(err)
+
+	err = muxer2.WriteHeader()
+	fmt.Println(err)
+
 	fmt.Println(streams)
-	fmt.Println(demuxer.SeekToTime(80.0))
+	fmt.Println(demuxer.SeekToTime(14.3*60.0))
+
+	gop := 0
 	for {
-		pkt, err := demuxer.ReadPacket()
+		i, pkt, err := demuxer.ReadPacket()
 		if err != nil {
 			break
 		}
-		fmt.Println(pkt.StreamIdx, streams[pkt.StreamIdx].TsToTime(pkt.Dts), len(pkt.Data))
+		if streams[i].IsVideo() && pkt.IsKeyFrame {
+			gop++
+		}
+		if gop == 2 {
+			break
+		}
+		fmt.Println(streams[i].Type(), fmt.Sprintf("ts=%.2f dur=%.3f cts=%.3f", demuxer.Time(), pkt.Duration, pkt.CompositionTime),
+			pkt.IsKeyFrame, len(pkt.Data), fmt.Sprintf("%x", pkt.Data[:4]))
+		muxer.WritePacket(i, pkt)
+		muxer2.WritePacket(i, pkt)
 	}
+
+	err = muxer.WriteTrailer()
+	fmt.Println(err)
 }
 
 func dumpFragMp4(filename string) {
@@ -79,10 +121,16 @@ func dumpFragMp4(filename string) {
 
 func main() {
 	dumpfrag := flag.String("dumpfrag", "", "dump fragment mp4 info")
+	test := flag.Bool("test", false, "test")
 	flag.Parse()
 
 	if *dumpfrag != "" {
 		dumpFragMp4(*dumpfrag)
+		return
+	}
+
+	if *test {
+		testMp4Demux()
 		return
 	}
 }
