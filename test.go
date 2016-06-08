@@ -114,7 +114,7 @@ func testRtsp(uri string) (err error) {
 	//cli.DebugConn = true
 
 	findcodec := func(codec av.AudioCodecData) (ok bool, err error, dec av.AudioDecoder, enc av.AudioEncoder) {
-		if false && codec.Type() == av.AAC {
+		if codec.Type() == av.AAC {
 			return
 		}
 		ok = true
