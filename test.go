@@ -209,6 +209,7 @@ func testRtsp(uri string) (err error) {
 		return
 	}
 
+	demuxer.Close()
 	outts.Close()
 	outmp4.Close()
 
