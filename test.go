@@ -6,6 +6,7 @@ import (
 	"os"
 	"io"
 	"math"
+	"time"
 	"io/ioutil"
 	"encoding/json"
 	"encoding/binary"
@@ -17,6 +18,7 @@ import (
 	"github.com/nareix/mp4/atom"
 	"github.com/nareix/mp4"
 	"github.com/nareix/av/transcode"
+	"github.com/nareix/rtmp"
 	"fmt"
 	"flag"
 	"net/http"
@@ -107,11 +109,28 @@ func dumpTs(filename string) {
 func testRtsp(uri string) (err error) {
 	ffmpeg.SetLogLevel(ffmpeg.DEBUG)
 
-	cli, err := rtsp.Open(uri)
+	cli, err := rtsp.DialTimeout(uri, time.Second*10)
 	if err != nil {
 		return
 	}
-	//cli.DebugConn = true
+	cli.Headers = append(cli.Headers, "User-Agent: Lavf57.8.102")
+	cli.RtpTimeout = time.Second*10
+	cli.DebugConn = true
+
+	var streams []av.CodecData
+	if streams, err = cli.Describe(); err != nil {
+		return
+	}
+
+	setup := []int{}
+	for i, stream := range streams {
+		if stream.IsVideo() {
+			setup = append(setup, i)
+		}
+	}
+	if err = cli.Setup(setup); err != nil {
+		return
+	}
 
 	findcodec := func(codec av.AudioCodecData) (ok bool, err error, dec av.AudioDecoder, enc av.AudioEncoder) {
 		if codec.Type() == av.AAC {
@@ -151,7 +170,7 @@ func testRtsp(uri string) (err error) {
 	if err = demuxer.Setup(); err != nil {
 		return
 	}
-	streams := demuxer.Streams()
+	streams, _ = demuxer.Streams()
 	for i, stream := range streams {
 		fmt.Println("#",i, stream.IsVideo())
 	}
@@ -190,7 +209,7 @@ func testRtsp(uri string) (err error) {
 			fmt.Println("gop:", gop)
 			gop++
 		}
-		fmt.Println("#", si, "len", len(pkt.Data), "dur", fmt.Sprintf("%.3f", pkt.Duration), "avsync", durs[0]-durs[1])
+		fmt.Println("#", si, "len", len(pkt.Data), "dur", fmt.Sprintf("%.3f", pkt.Duration))
 
 		if gop > 0 {
 			if err = tsmux.WritePacket(si, pkt); err != nil {
@@ -303,6 +322,11 @@ func testTranscode() (err error) {
 	return
 }
 
+func testRtmpServer() (err error) {
+	rtmp.SimpleServer()
+	return
+}
+
 func main() {
 	dumpts := flag.Bool("dumpts", false, "dump ts file info")
 	dumpfrag := flag.String("dumpfrag", "", "dump fragment mp4 info")
@@ -311,8 +335,15 @@ func main() {
 	testrtsp := flag.String("testrtsp", "", "test rtsp")
 	testaacenc := flag.String("testaacenc", "", "test aac encoder")
 	testtranscode := flag.Bool("testtranscode", false, "test transcode")
+	rtmpserver := flag.Bool("rtmpserver", false, "rtmp server")
 
 	flag.Parse()
+
+	if *rtmpserver {
+		if err := testRtmpServer(); err != nil {
+			panic(err)
+		}
+	}
 
 	if *testaacenc != "" {
 		if err := testAACEnc(*testaacenc); err != nil {
