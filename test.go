@@ -79,7 +79,7 @@ func dumpTs(filename string) {
 	file, err := os.Open(filename)
 	demuxer, _ := ts.Open(file)
 
-	streams := demuxer.Streams()
+	streams, _ := demuxer.Streams()
 	fmt.Fprintln(dumpfile, streams, err)
 	aacTotalDur := float64(0)
 
