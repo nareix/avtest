@@ -223,23 +223,27 @@ func testRtsp(uri string) (err error) {
 	cli.RtpTimeout = time.Second*10
 	cli.RtspTimeout = time.Second*10
 	cli.DebugRtsp = true
-	cli.DebugRtp = true
+	cli.DebugRtp = false
 	cli.SkipErrRtpBlock = true
 	cli.RtpKeepAliveTimeout = time.Second*3
 	fmt.Println("connected")
 
-	var streams []av.CodecData
-	if streams, err = cli.Describe(); err != nil {
+	if _, err = cli.Describe(); err != nil {
 		return
 	}
-
-	setup := []int{}
-	for i, stream := range streams {
-		if true || stream.Type().IsVideo() {
-			setup = append(setup, i)
-		}
+	if err = cli.SetupAll(); err != nil {
+		return
 	}
-	if err = cli.Setup(setup); err != nil {
+	if err = cli.Play(); err != nil {
+		return
+	}
+	if err = cli.Probe(); err != nil {
+		return
+	}
+	fmt.Println("probe done")
+
+	var streams []av.CodecData
+	if streams, err = cli.Streams(); err != nil {
 		return
 	}
 
@@ -508,60 +512,110 @@ func testRtmpPlay(uri string) (err error) {
 }
 
 func testRtmpServer() (err error) {
-	var infile *os.File
-	if infile, err = os.Open("b.flv"); err != nil {
-		return
-	}
-
-	var flvdemux *flv.Demuxer
-	if flvdemux, err = flv.Open(infile); err != nil {
-		return
-	}
-
-	var streams []av.CodecData
-	if streams, err = flvdemux.Streams(); err != nil {
-		return
-	}
-	for _, stream := range streams {
-		fmt.Println(stream.Type())
-	}
-
-	pkts := []av.Packet{}
-	for {
-		pkt, err := flvdemux.ReadPacket()
-		if err != nil {
-			break
-		}
-		pkts = append(pkts, pkt)
-	}
-
 	server := &rtmp.Server{}
 	server.Debug = true
-	server.DebugConn = true
+	server.DebugConn = false
 
-	server.HandlePlay = func(conn *rtmp.Conn) {
-		conn.WriteHeader(streams)
-		for _, pkt := range pkts[100:] {
-			pkt.Time += time.Second
-			conn.WritePacket(pkt)
+	handlePlay := func(conn *rtmp.Conn) (err error) {
+		fmt.Println("play", conn.Path)
+
+		var demuxer av.Demuxer
+
+		if false {
+			var cli *rtmp.Conn
+			if cli, err = rtmp.Dial("rtmp://live.hkstv.hk.lxdns.com/live/hks"); err != nil {
+				return
+			}
+			if err = cli.ReadHeader(); err != nil {
+				return
+			}
+			defer cli.Close()
+			demuxer = cli
+		} else {
+			var file *os.File
+			if file, err = os.Open("projectindex-0.flv"); err != nil {
+				return
+			}
+			var demux *flv.Demuxer
+			if demux, err = flv.Open(file); err != nil {
+				return
+			}
+			demuxer = demux
+			defer file.Close()
 		}
+
+		var streams []av.CodecData
+		if streams, err = demuxer.Streams(); err != nil {
+			return
+		}
+		for _, stream := range streams {
+			fmt.Println(stream.Type())
+		}
+		if err = conn.WriteHeader(streams); err != nil {
+			return
+		}
+
+		starttm := time.Now()
+		var pkt av.Packet
 		for {
-			time.Sleep(time.Second)
+			pkt, err = demuxer.ReadPacket()
+			if err != nil {
+				err = nil
+				break
+			}
+			fmt.Println("write", pkt.Idx, pkt.Time, len(pkt.Data), pkt.IsKeyFrame)
+			if err = conn.WritePacket(pkt); err != nil {
+				return
+			}
+			delta := time.Now().Sub(starttm)-pkt.Time+time.Second*3
+			if delta < 0 {
+				time.Sleep(-delta)
+			}
 		}
+
+		select {}
+
+		return
 	}
 
-	server.HandlePublish = func(conn *rtmp.Conn) {
-		var err error
+	handlePublish := func(conn *rtmp.Conn) (err error) {
 		var streams []av.CodecData
+
+		fmt.Println("publish:", conn.Path)
+
 		if err = conn.ReadHeader(); err != nil {
 			return
 		}
 		if streams, err = conn.Streams(); err != nil {
 			return
 		}
-		fmt.Println("publish:", conn.Path)
+
+		fmt.Println("publish: streams:")
 		for _, stream := range streams {
 			fmt.Println(stream.Type())
+		}
+
+		conn.Debug = false
+		var pkt av.Packet
+		for i := 0; i < 10; i++ {
+			if pkt, err = conn.ReadPacket(); err != nil {
+				return
+			}
+			fmt.Println(streams[pkt.Idx].Type(), pkt.Time, len(pkt.Data))
+		}
+
+		return
+	}
+
+	server.HandlePublish = func(conn *rtmp.Conn) {
+		if err := handlePublish(conn); err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	server.HandlePlay = func(conn *rtmp.Conn) {
+		if err := handlePlay(conn); err != nil {
+			fmt.Println(err)
 		}
 	}
 
