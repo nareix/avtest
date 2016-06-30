@@ -4,22 +4,17 @@ package main
 import (
 	"bytes"
 	"os"
-	"strings"
-	"bufio"
 	"io"
 	"math"
 	"time"
 	"io/ioutil"
 	"encoding/json"
-	"encoding/hex"
 	"encoding/binary"
 	"github.com/nareix/av"
-	"github.com/nareix/av/pktque"
+	"github.com/nareix/av/avutil"
 	"github.com/nareix/rtsp"
 	"github.com/nareix/ts"
-	"github.com/nareix/pio"
 	"github.com/nareix/flv"
-	"github.com/nareix/flv/flvio"
 	"github.com/nareix/ffmpeg"
 	"github.com/nareix/codec/aacparser"
 	"github.com/nareix/mp4/atom"
@@ -79,108 +74,6 @@ func dumpFragMp4(filename string) {
 	outfile.Close()
 }
 
-func dumpTs(filename string) {
-	dumpfile, _ := os.Create(filename+".dumpts.log")
-	ts.DebugReader = true
-	ts.DebugOutput = dumpfile
-	file, err := os.Open(filename)
-	demuxer, _ := ts.Open(file)
-
-	streams, _ := demuxer.Streams()
-	fmt.Fprintln(dumpfile, streams, err)
-	aacTotalDur := float64(0)
-
-	for {
-		pkt, err := demuxer.ReadPacket()
-		if err != nil {
-			break
-		}
-		codec := streams[pkt.Idx]
-		if codec.Type() == av.AAC {
-			acodec := codec.(av.AudioCodecData)
-			if _, _, samples, err := aacparser.ExtractADTSFrames(pkt.Data); err != nil {
-				panic(err)
-			} else {
-				dur := float64(samples)/float64(acodec.SampleRate())
-				aacTotalDur += dur
-			}
-		}
-		fmt.Fprintln(dumpfile, codec.Type(), fmt.Sprintf("ts=%.2f cts=%.3f", pkt.Time, pkt.CompositionTime),
-			pkt.IsKeyFrame, len(pkt.Data), fmt.Sprintf("%x", pkt.Data[:4]))
-	}
-	fmt.Fprintln(dumpfile, "aacTotalDur", aacTotalDur)
-
-	dumpfile.Close()
-}
-
-func readRtspPackets(uri string) (err error) {
-	cli, err := rtsp.DialTimeout(uri, time.Second*10)
-	if err != nil {
-		return
-	}
-	cli.Headers = append(cli.Headers, "User-Agent: Lavf57.8.102")
-	cli.RtpTimeout = time.Second*10
-
-	if err = cli.ReadHeader(); err != nil {
-		return
-	}
-
-	for {
-		_, err = cli.ReadPacket()
-		if err != nil {
-			break
-		}
-	}
-
-	return
-}
-
-func testFlv(filename string) (err error) {
-	var infile, outfile *os.File
-	if infile, err = os.Open(filename); err != nil {
-		return
-	}
-	if outfile, err = os.Create(filename+".copy.flv"); err != nil {
-		return
-	}
-
-	r := pio.NewReader(bufio.NewReader(infile))
-	w := pio.NewWriter(outfile)
-
-	if _, err = flvio.ReadFileHeader(r); err != nil {
-		return
-	}
-	fmt.Println("got header")
-
-	if err = flvio.WriteFileHeader(w, flvio.FILE_HAS_VIDEO|flvio.FILE_HAS_AUDIO); err != nil {
-		return
-	}
-
-	for {
-		var tag flvio.Tag
-		var ts int32
-		if tag, ts, err = flvio.ReadTag(r); err != nil {
-			return
-		}
-
-		switch v := tag.(type) {
-		case *flvio.Videodata:
-			fmt.Println("video", len(v.Data))
-		case *flvio.Audiodata:
-			fmt.Println("audio", len(v.Data))
-		case *flvio.Scriptdata:
-			fmt.Println("script", len(v.Data))
-		}
-
-		if err = flvio.WriteTag(w, tag, ts); err != nil {
-			return
-		}
-	}
-
-	outfile.Close()
-	return
-}
-
 func rtspDumpPCMU(cli *rtsp.Client) (err error) {
 	outfile, _ := os.Create("out.mulaw")
 
@@ -223,29 +116,16 @@ func testRtsp(uri string) (err error) {
 	cli.RtpTimeout = time.Second*10
 	cli.RtspTimeout = time.Second*10
 	cli.DebugRtsp = true
-	cli.DebugRtp = false
+	cli.DebugRtp = true
 	cli.SkipErrRtpBlock = true
 	cli.RtpKeepAliveTimeout = time.Second*3
 	fmt.Println("connected")
-
-	if _, err = cli.Describe(); err != nil {
-		return
-	}
-	if err = cli.SetupAll(); err != nil {
-		return
-	}
-	if err = cli.Play(); err != nil {
-		return
-	}
-	if err = cli.Probe(); err != nil {
-		return
-	}
-	fmt.Println("probe done")
 
 	var streams []av.CodecData
 	if streams, err = cli.Streams(); err != nil {
 		return
 	}
+	fmt.Println("probe done")
 
 	findcodec := func(codec av.AudioCodecData) (ok bool, err error, dec av.AudioDecoder, enc av.AudioEncoder) {
 		if codec.Type() == av.AAC {
@@ -291,23 +171,17 @@ func testRtsp(uri string) (err error) {
 		fmt.Println("#",i, stream.Type().IsVideo())
 	}
 
-	var outts *os.File
-	if outts, err = os.Create("out.ts"); err != nil {
+	var tsmux av.MuxCloser
+	if tsmux, err = avutil.Create("out.ts", streams); err != nil {
 		return
 	}
-	var tsmux *ts.Muxer
-	if tsmux, err = ts.Create(outts, streams); err != nil {
-		return
-	}
+	defer tsmux.Close()
 
-	var outmp4 *os.File
-	if outmp4, err = os.Create("out.mp4"); err != nil {
+	var mp4mux av.MuxCloser
+	if mp4mux, err = avutil.Create("out.mp4", streams); err != nil {
 		return
 	}
-	var mp4mux *mp4.Muxer
-	if mp4mux, err = mp4.Create(outmp4, streams); err != nil {
-		return
-	}
+	defer mp4mux.Close()
 
 	gop := 0
 
@@ -349,8 +223,6 @@ func testRtsp(uri string) (err error) {
 	}
 
 	transcoder.Close()
-	outts.Close()
-	outmp4.Close()
 
 	return
 }
@@ -438,116 +310,28 @@ func testAACEnc(filename string) (err error) {
 	return
 }
 
-func testTranscode() (err error) {
-	return
-}
-
-func testRtmpClient(uri string) (err error) {
-	var conn *rtmp.Conn
-	if conn, err = rtmp.DialTimeout(uri, time.Second*10); err != nil {
-		return
-	}
-
-	if err = conn.ReadHeader(); err != nil {
-		return
-	}
-
-	var streams []av.CodecData
-	if streams, err = conn.Streams(); err != nil {
-		return
-	}
-
-	fmt.Println(streams)
-
-	return
-}
-
-func testRtmpPlay(uri string) (err error) {
-	var flvfile *os.File
-	if flvfile, err = os.Create("out.flv"); err != nil {
-		return
-	}
-
-	var conn *rtmp.Conn
-	if conn, err = rtmp.DialTimeout(uri, time.Second*10); err != nil {
-		return
-	}
-	if err = conn.ReadHeader(); err != nil {
-		return
-	}
-	var streams []av.CodecData
-	if streams, err = conn.Streams(); err != nil {
-		return
-	}
-	for _, stream := range streams {
-		fmt.Println(stream.Type())
-	}
-
-	var mux *flv.Muxer
-	if mux, err = flv.Create(flvfile, streams); err != nil {
-		return
-	}
-
-	for {
-		var pkt av.Packet
-		if pkt, err = conn.ReadPacket(); err != nil {
-			return
-		}
-		if streams[pkt.Idx].Type() == av.AAC {
-			size := 16
-			if len(pkt.Data) < size {
-				size = len(pkt.Data)
-			}
-			fmt.Print(hex.Dump(pkt.Data[:size]))
-		}
-
-		fmt.Println(pkt.Idx, pkt.Time, len(pkt.Data), pkt.IsKeyFrame)
-
-		if err = mux.WritePacket(pkt); err != nil {
-			return
-		}
-	}
-
-	return
-}
-
 func testRtmpServer() (err error) {
 	server := &rtmp.Server{}
 	server.Debug = true
 	server.DebugConn = false
 
 	handlePlay := func(conn *rtmp.Conn) (err error) {
-		fmt.Println("play", conn.Path)
+		var demuxer av.DemuxCloser
 
-		var demuxer av.Demuxer
+		uri := ""
+		uri = "rtmp://live.hkstv.hk.lxdns.com/live/hks"
+		//uri = "projectindex-0.flv"
 
-		if false {
-			var cli *rtmp.Conn
-			if cli, err = rtmp.Dial("rtmp://live.hkstv.hk.lxdns.com/live/hks"); err != nil {
-				return
-			}
-			if err = cli.ReadHeader(); err != nil {
-				return
-			}
-			defer cli.Close()
-			demuxer = cli
-		} else {
-			var file *os.File
-			if file, err = os.Open("projectindex-0.flv"); err != nil {
-				return
-			}
-			var demux *flv.Demuxer
-			if demux, err = flv.Open(file); err != nil {
-				return
-			}
-			demuxer = demux
-			defer file.Close()
+		if demuxer, err = avutil.Open(uri); err != nil {
+			return
 		}
+		defer demuxer.Close()
 
 		var streams []av.CodecData
 		if streams, err = demuxer.Streams(); err != nil {
 			return
 		}
+
 		for _, stream := range streams {
 			fmt.Println(stream.Type())
 		}
@@ -555,7 +339,6 @@ func testRtmpServer() (err error) {
 			return
 		}
 
-		starttm := time.Now()
 		var pkt av.Packet
 		for {
 			pkt, err = demuxer.ReadPacket()
@@ -566,10 +349,6 @@ func testRtmpServer() (err error) {
 			fmt.Println("write", pkt.Idx, pkt.Time, len(pkt.Data), pkt.IsKeyFrame)
 			if err = conn.WritePacket(pkt); err != nil {
 				return
-			}
-			delta := time.Now().Sub(starttm)-pkt.Time+time.Second*3
-			if delta < 0 {
-				time.Sleep(-delta)
 			}
 		}
 
@@ -582,10 +361,6 @@ func testRtmpServer() (err error) {
 		var streams []av.CodecData
 
 		fmt.Println("publish:", conn.Path)
-
-		if err = conn.ReadHeader(); err != nil {
-			return
-		}
 		if streams, err = conn.Streams(); err != nil {
 			return
 		}
@@ -626,15 +401,8 @@ func testRtmpServer() (err error) {
 	return
 }
 
-type fakeCodec struct {
-	typ av.CodecType
-}
-
-func (self fakeCodec) Type() av.CodecType {
-	return self.typ
-}
-
 func testNormailizer() (err error) {
+	/*
 	var lineb []byte
 	br := bufio.NewReader(os.Stdin)
 
@@ -667,42 +435,52 @@ func testNormailizer() (err error) {
 			fmt.Println("out", pkt.Idx, pkt.Time)
 		}
 	}
+	*/
+	return
+}
+
+func playurl(url string) (err error) {
+	var demuxer av.DemuxCloser
+	if demuxer, err = avutil.Open(url); err != nil {
+		return
+	}
+
+	for {
+		var pkt av.Packet
+		if pkt, err = demuxer.ReadPacket(); err != nil {
+			return
+		}
+		fmt.Println(pkt.Idx, pkt.Time, len(pkt.Data))
+	}
+}
+
+func init() {
+	avutil.AddHandler(ts.Handler)
+	avutil.AddHandler(mp4.Handler)
+	avutil.AddHandler(rtsp.Handler)
+	avutil.AddHandler(rtmp.Handler)
+	avutil.AddHandler(flv.Handler)
 }
 
 func main() {
-	dumpts := flag.Bool("dumpts", false, "dump ts file info")
 	dumpfrag := flag.String("dumpfrag", "", "dump fragment mp4 info")
 	httpserver := flag.String("httpserver", "", "server http")
 
-	testflv := flag.String("testflv", "", "test flv")
+	play := flag.String("play", "", "play url")
 	testrtsp := flag.String("testrtsp", "", "test rtsp")
 	testaacenc := flag.String("testaacenc", "", "test aac encoder")
-	testtranscode := flag.Bool("testtranscode", false, "test transcode")
 	rtmpserver := flag.Bool("rtmpserver", false, "rtmp server")
-	rtmpplay := flag.String("rtmpplay", "", "rtmp play")
-
-	testnormalizer := flag.Bool("testnormalizer", false, "testnormalizer")
 
 	flag.Parse()
 
-	if *testnormalizer {
-		testNormailizer()
+	if *play != "" {
+		if err := playurl(*play); err != nil {
+			panic(err)
+		}
 	}
 
 	if *rtmpserver {
 		if err := testRtmpServer(); err != nil {
-			panic(err)
-		}
-	}
-
-	if *rtmpplay != "" {
-		if err := testRtmpPlay(*rtmpplay); err != nil {
-			panic(err)
-		}
-	}
-
-	if *testflv != "" {
-		if err := testFlv(*testflv); err != nil {
 			panic(err)
 		}
 	}
@@ -716,18 +494,6 @@ func main() {
 	if *testrtsp != "" {
 		if err := testRtsp(*testrtsp); err != nil {
 			panic(err)
-		}
-	}
-
-	if *testtranscode {
-		if err := testTranscode(); err != nil {
-			panic(err)
-		}
-	}
-
-	if *dumpts {
-		for _, filename := range flag.Args(){
-			dumpTs(filename)
 		}
 	}
 
