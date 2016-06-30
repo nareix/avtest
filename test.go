@@ -444,6 +444,13 @@ func playurl(url string) (err error) {
 	if demuxer, err = avutil.Open(url); err != nil {
 		return
 	}
+	var streams []av.CodecData
+	if streams, err = demuxer.Streams(); err != nil {
+		return
+	}
+	for i, stream := range streams {
+		fmt.Println(i, stream.Type())
+	}
 
 	for {
 		var pkt av.Packet
@@ -475,25 +482,25 @@ func main() {
 
 	if *play != "" {
 		if err := playurl(*play); err != nil {
-			panic(err)
+			fmt.Println(err)
 		}
 	}
 
 	if *rtmpserver {
 		if err := testRtmpServer(); err != nil {
-			panic(err)
+			fmt.Println(err)
 		}
 	}
 
 	if *testaacenc != "" {
 		if err := testAACEnc(*testaacenc); err != nil {
-			panic(err)
+			fmt.Println(err)
 		}
 	}
 
 	if *testrtsp != "" {
 		if err := testRtsp(*testrtsp); err != nil {
-			panic(err)
+			fmt.Println(err)
 		}
 	}
 
