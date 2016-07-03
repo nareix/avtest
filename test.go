@@ -7,20 +7,20 @@ import (
 	"io"
 	"math"
 	"time"
+	"image/png"
 	"io/ioutil"
 	"encoding/json"
 	"encoding/binary"
-	"github.com/nareix/av"
-	"github.com/nareix/av/avutil"
-	"github.com/nareix/rtsp"
-	"github.com/nareix/ts"
-	"github.com/nareix/flv"
-	"github.com/nareix/ffmpeg"
-	"github.com/nareix/codec/aacparser"
-	"github.com/nareix/mp4/atom"
-	"github.com/nareix/mp4"
-	"github.com/nareix/av/transcode"
-	"github.com/nareix/rtmp"
+	_"encoding/hex"
+	"github.com/nareix/joy4/av"
+	"github.com/nareix/joy4/format"
+	"github.com/nareix/joy4/av/avutil"
+	"github.com/nareix/joy4/format/rtsp"
+	"github.com/nareix/joy4/cgo/ffmpeg"
+	"github.com/nareix/joy4/codec/aacparser"
+	"github.com/nareix/joy4/format/mp4/atom"
+	"github.com/nareix/joy4/av/transcode"
+	"github.com/nareix/joy4/format/rtmp"
 	"fmt"
 	"flag"
 	"net/http"
@@ -116,7 +116,7 @@ func testRtsp(uri string) (err error) {
 	cli.RtpTimeout = time.Second*10
 	cli.RtspTimeout = time.Second*10
 	cli.DebugRtsp = true
-	cli.DebugRtp = true
+	//cli.DebugRtp = true
 	cli.SkipErrRtpBlock = true
 	cli.RtpKeepAliveTimeout = time.Second*3
 	fmt.Println("connected")
@@ -299,13 +299,67 @@ func testAACEnc(filename string) (err error) {
 			return
 		}
 		for _, pkt := range pkts {
-			adtshdr := codec.MakeADTSHeader(enc.FrameSampleCount, len(pkt))
+			adtshdr := aacparser.MakeADTSHeader(codec.Config, enc.FrameSampleCount, len(pkt))
 			file.Write(adtshdr)
 			file.Write(pkt)
 			fmt.Println("pkt", len(pkt))
 		}
 	}
 	file.Close()
+
+	return
+}
+
+func testH264Dec(filename string) (err error) {
+	var file av.DemuxCloser
+	if file, err = avutil.Open(filename); err != nil {
+		return
+	}
+
+	var streams []av.CodecData
+	if streams, err = file.Streams(); err != nil {
+		return
+	}
+
+	h264 := -1
+	for i, stream := range streams {
+		if stream.Type() == av.H264 {
+			h264 = i
+		}
+	}
+	if h264 == -1 {
+		err = fmt.Errorf("h264 stream not found")
+		return
+	}
+
+	var dec *ffmpeg.VideoDecoder
+	if dec, err = ffmpeg.NewVideoDecoder(streams[h264]); err != nil {
+		return
+	}
+
+	imgidx := 0
+
+	for {
+		var pkt av.Packet
+		if pkt, err = file.ReadPacket(); err != nil {
+			return
+		}
+
+		if int(pkt.Idx) == h264 && pkt.IsKeyFrame {
+			var img *ffmpeg.VideoFrame
+			if img, err = dec.Decode(pkt.Data); err != nil {
+				return
+			}
+			if img != nil {
+				fmt.Println("h264: decoded", pkt.Time)
+				pngfile, _ := os.Create(fmt.Sprintf("%s.%d.png", filename, imgidx))
+				png.Encode(pngfile, &img.Image)
+				pngfile.Close()
+				imgidx++
+				img.Free()
+			}
+		}
+	}
 
 	return
 }
@@ -320,8 +374,12 @@ func testRtmpServer() (err error) {
 
 		uri := ""
 		uri = "rtmp://live.hkstv.hk.lxdns.com/live/hks"
+		//uri = "rtsp://95.131.181.226:9099/onvif/media/PRF00.wxp"
+		//uri = "rtsp://admin:123456@176.99.65.80:558/mpeg4cif"
+		uri = "bug.ts"
 		//uri = "projectindex-0.flv"
 
+		fmt.Println("play:", uri)
 		if demuxer, err = avutil.Open(uri); err != nil {
 			return
 		}
@@ -331,24 +389,35 @@ func testRtmpServer() (err error) {
 		if streams, err = demuxer.Streams(); err != nil {
 			return
 		}
-
+		fmt.Println("streams:")
 		for _, stream := range streams {
 			fmt.Println(stream.Type())
 		}
+
 		if err = conn.WriteHeader(streams); err != nil {
 			return
 		}
+		//conn.Debug = true
+
+		gop := 0
 
 		var pkt av.Packet
-		for {
+		for i := 0; ; i++ {
 			pkt, err = demuxer.ReadPacket()
 			if err != nil {
 				err = nil
 				break
 			}
-			fmt.Println("write", pkt.Idx, pkt.Time, len(pkt.Data), pkt.IsKeyFrame)
-			if err = conn.WritePacket(pkt); err != nil {
-				return
+
+			if pkt.IsKeyFrame {
+				gop++
+			}
+
+			if gop > 0 {
+				fmt.Println("write", pkt.Idx, pkt.Time, len(pkt.Data), pkt.IsKeyFrame)
+				if err = conn.WritePacket(pkt); err != nil {
+					return
+				}
 			}
 		}
 
@@ -457,16 +526,42 @@ func playurl(url string) (err error) {
 		if pkt, err = demuxer.ReadPacket(); err != nil {
 			return
 		}
-		fmt.Println(pkt.Idx, pkt.Time, len(pkt.Data))
+		fmt.Println(pkt.Idx, pkt.Time, pkt.IsKeyFrame, len(pkt.Data))
 	}
 }
 
 func init() {
-	avutil.AddHandler(ts.Handler)
-	avutil.AddHandler(mp4.Handler)
-	avutil.AddHandler(rtsp.Handler)
-	avutil.AddHandler(rtmp.Handler)
-	avutil.AddHandler(flv.Handler)
+	format.RegisterAll()
+}
+
+func rtmpPublish(url string, filename string) (err error) {
+	var conn *rtmp.Conn
+	if conn, err = rtmp.Dial(url); err != nil {
+		return
+	}
+	var file av.DemuxCloser
+	if file, err = avutil.Open(filename); err != nil {
+		return
+	}
+	var streams []av.CodecData
+	if streams, err = file.Streams(); err != nil {
+		return
+	}
+	if err = conn.WriteHeader(streams); err != nil {
+		return
+	}
+	for {
+		var pkt av.Packet
+		if pkt, err = file.ReadPacket(); err != nil {
+			break
+		}
+		fmt.Println("publish", pkt.Time, pkt.Idx, len(pkt.Data))
+		if err = conn.WritePacket(pkt); err != nil {
+			return
+		}
+		time.Sleep(time.Millisecond*10)
+	}
+	return
 }
 
 func main() {
@@ -476,32 +571,39 @@ func main() {
 	play := flag.String("play", "", "play url")
 	testrtsp := flag.String("testrtsp", "", "test rtsp")
 	testaacenc := flag.String("testaacenc", "", "test aac encoder")
+	testh264dec := flag.String("testh264dec", "", "test h264 decoder")
 	rtmpserver := flag.Bool("rtmpserver", false, "rtmp server")
+	rtmppublish := flag.String("rtmppublish", "", "rtmp publish")
 
 	flag.Parse()
 
+	var err error
+
 	if *play != "" {
-		if err := playurl(*play); err != nil {
-			fmt.Println(err)
-		}
+		err = playurl(*play)
 	}
 
 	if *rtmpserver {
-		if err := testRtmpServer(); err != nil {
-			fmt.Println(err)
+		err = testRtmpServer()
+	}
+
+	if *rtmppublish != "" {
+		args := flag.Args()
+		if len(args) > 0 {
+			err = rtmpPublish(*rtmppublish, args[0])
 		}
 	}
 
 	if *testaacenc != "" {
-		if err := testAACEnc(*testaacenc); err != nil {
-			fmt.Println(err)
-		}
+		err = testAACEnc(*testaacenc)
+	}
+
+	if *testh264dec != "" {
+		err = testH264Dec(*testh264dec)
 	}
 
 	if *testrtsp != "" {
-		if err := testRtsp(*testrtsp); err != nil {
-			fmt.Println(err)
-		}
+		err = testRtsp(*testrtsp)
 	}
 
 	if *dumpfrag != "" {
@@ -509,7 +611,11 @@ func main() {
 	}
 
 	if *httpserver != "" {
-		http.ListenAndServe(*httpserver, http.FileServer(http.Dir(".")))
+		err = http.ListenAndServe(*httpserver, http.FileServer(http.Dir(".")))
+	}
+
+	if err != nil {
+		fmt.Println(err)
 	}
 }
 
